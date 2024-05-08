@@ -66,6 +66,14 @@ type Receipt struct {
 	BlobGasUsed       uint64         `json:"blobGasUsed,omitempty"`
 	BlobGasPrice      *big.Int       `json:"blobGasPrice,omitempty"`
 
+	// DepositNonce was introduced in Regolith to store the actual nonce used by deposit transactions
+	// The state transition process ensures this is only set for Regolith deposit transactions.
+	DepositNonce *uint64 `json:"depositNonce,omitempty"`
+	// DepositReceiptVersion was introduced in Canyon to indicate an update to how receipt hashes
+	// should be computed when set. The state transition process ensures this is only set for
+	// post-Canyon deposit transactions.
+	DepositReceiptVersion *uint64 `json:"depositReceiptVersion,omitempty"`
+
 	// Inclusion information: These fields provide information about the inclusion of the
 	// transaction corresponding to this receipt.
 	BlockHash        common.Hash `json:"blockHash,omitempty"`
@@ -84,6 +92,9 @@ type receiptMarshaling struct {
 	BlobGasPrice      *hexutil.Big
 	BlockNumber       *hexutil.Big
 	TransactionIndex  hexutil.Uint
+
+	DepositNonce          *hexutil.Uint64
+	DepositReceiptVersion *hexutil.Uint64
 }
 
 // receiptRLP is the consensus encoding of a receipt.
