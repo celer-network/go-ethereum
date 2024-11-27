@@ -36,6 +36,7 @@ import (
 var (
 	receiptStatusFailedRLP     = []byte{}
 	receiptStatusSuccessfulRLP = []byte{0x01}
+	receiptRootArbitrumLegacy  = []byte{0x00}
 )
 
 var errShortTypedReceipt = errors.New("typed receipt too short")
@@ -50,6 +51,9 @@ const (
 
 // Receipt represents the results of a transaction.
 type Receipt struct {
+	// Arbitrum Implementation fields
+	GasUsedForL1 uint64 `json:"gasUsedForL1"`
+
 	// Consensus fields: These fields are defined by the Yellow Paper
 	Type              uint8  `json:"type,omitempty"`
 	PostState         []byte `json:"root"`
@@ -123,6 +127,18 @@ type depositReceiptRLP struct {
 type storedReceiptRLP struct {
 	PostStateOrStatus []byte
 	CumulativeGasUsed uint64
+	L1GasUsed         uint64
+	Logs              []*Log
+	ContractAddress   *common.Address `rlp:"optional"` // set on new versions if an Arbitrum tx type
+}
+
+type arbLegacyStoredReceiptRLP struct {
+	PostStateOrStatus []byte
+	CumulativeGasUsed uint64
+	GasUsed           uint64
+	L1GasUsed         uint64
+	Status            uint64
+	ContractAddress   common.Address
 	Logs              []*Log
 }
 
@@ -291,8 +307,18 @@ type ReceiptForStorage Receipt
 func (r *ReceiptForStorage) EncodeRLP(_w io.Writer) error {
 	w := rlp.NewEncoderBuffer(_w)
 	outerList := w.List()
-	w.WriteBytes((*Receipt)(r).statusEncoding())
-	w.WriteUint64(r.CumulativeGasUsed)
+	if r.Type == ArbitrumLegacyTxType {
+		w.WriteBytes(receiptRootArbitrumLegacy)
+		w.WriteUint64(r.CumulativeGasUsed)
+		w.WriteUint64(r.GasUsed)
+		w.WriteUint64(r.GasUsedForL1)
+		w.WriteUint64(r.Status)
+		rlp.Encode(w, r.ContractAddress)
+	} else {
+		w.WriteBytes((*Receipt)(r).statusEncoding())
+		w.WriteUint64(r.CumulativeGasUsed)
+		w.WriteUint64(r.GasUsedForL1)
+	}
 	logList := w.List()
 	for _, log := range r.Logs {
 		if err := log.EncodeRLP(w); err != nil {
@@ -300,6 +326,9 @@ func (r *ReceiptForStorage) EncodeRLP(_w io.Writer) error {
 		}
 	}
 	w.ListEnd(logList)
+	if r.Type >= ArbitrumDepositTxType && r.Type != ArbitrumLegacyTxType && r.ContractAddress != (common.Address{}) {
+		w.WriteBytes(r.ContractAddress[:])
+	}
 	w.ListEnd(outerList)
 	return w.Flush()
 }
@@ -307,16 +336,56 @@ func (r *ReceiptForStorage) EncodeRLP(_w io.Writer) error {
 // DecodeRLP implements rlp.Decoder, and loads both consensus and implementation
 // fields of a receipt from an RLP stream.
 func (r *ReceiptForStorage) DecodeRLP(s *rlp.Stream) error {
+	// Retrieve the entire receipt blob as we need to try multiple decoders
+	blob, err := s.Raw()
+	if err != nil {
+		return err
+	}
+	// Try decoding from the newest format for future proofness, then the older one
+	// for old nodes that just upgraded. V4 was an intermediate unreleased format so
+	// we do need to decode it, but it's not common (try last).
+	if err := decodeStoredReceiptRLP(r, blob); err == nil {
+		return nil
+	}
+	return decodeArbitrumLegacyStoredReceiptRLP(r, blob)
+}
+
+func decodeArbitrumLegacyStoredReceiptRLP(r *ReceiptForStorage, blob []byte) error {
+	var stored arbLegacyStoredReceiptRLP
+	if err := rlp.DecodeBytes(blob, &stored); err != nil {
+		return err
+	}
+	if !bytes.Equal(stored.PostStateOrStatus, receiptRootArbitrumLegacy) {
+		return errors.New("not arbitrum legacy Tx")
+	}
+	r.Type = ArbitrumLegacyTxType
+	(*Receipt)(r).PostState = receiptRootArbitrumLegacy
+	r.Status = stored.Status
+	r.CumulativeGasUsed = stored.CumulativeGasUsed
+	r.GasUsed = stored.GasUsed
+	r.GasUsedForL1 = stored.L1GasUsed
+	r.ContractAddress = stored.ContractAddress
+	r.Logs = stored.Logs
+	r.Bloom = CreateBloom(Receipts{(*Receipt)(r)})
+
+	return nil
+}
+
+func decodeStoredReceiptRLP(r *ReceiptForStorage, blob []byte) error {
 	var stored storedReceiptRLP
-	if err := s.Decode(&stored); err != nil {
+	if err := rlp.DecodeBytes(blob, &stored); err != nil {
 		return err
 	}
 	if err := (*Receipt)(r).setStatus(stored.PostStateOrStatus); err != nil {
 		return err
 	}
 	r.CumulativeGasUsed = stored.CumulativeGasUsed
+	r.GasUsedForL1 = stored.L1GasUsed
 	r.Logs = stored.Logs
 	r.Bloom = CreateBloom(Receipts{(*Receipt)(r)})
+	if stored.ContractAddress != nil {
+		r.ContractAddress = *stored.ContractAddress
+	}
 
 	return nil
 }
@@ -331,13 +400,17 @@ func (rs Receipts) Len() int { return len(rs) }
 func (rs Receipts) EncodeIndex(i int, w *bytes.Buffer) {
 	r := rs[i]
 	data := &receiptRLP{r.statusEncoding(), r.CumulativeGasUsed, r.Bloom, r.Logs}
-	if r.Type == LegacyTxType {
+	if r.Type == LegacyTxType || r.Type == ArbitrumLegacyTxType {
 		rlp.Encode(w, data)
 		return
 	}
 	w.WriteByte(r.Type)
 	switch r.Type {
 	case AccessListTxType, DynamicFeeTxType, BlobTxType:
+		rlp.Encode(w, data)
+	case ArbitrumDepositTxType, ArbitrumUnsignedTxType, ArbitrumContractTxType, ArbitrumRetryTxType, ArbitrumSubmitRetryableTxType, ArbitrumInternalTxType:
+		// Arbitrum: same as above, but this should help prevent future merge conflicts,
+		// by keeping above case statement the same.
 		rlp.Encode(w, data)
 	case DepositTxType:
 		if r.DepositReceiptVersion != nil {
@@ -380,20 +453,24 @@ func (rs Receipts) DeriveFields(config *params.ChainConfig, hash common.Hash, nu
 		rs[i].BlockNumber = new(big.Int).SetUint64(number)
 		rs[i].TransactionIndex = uint(i)
 
-		// The contract address can be derived from the transaction itself
-		if txs[i].To() == nil {
-			// Deriving the signer is expensive, only do if it's actually needed
-			from, _ := Sender(signer, txs[i])
-			rs[i].ContractAddress = crypto.CreateAddress(from, txs[i].Nonce())
-		} else {
-			rs[i].ContractAddress = common.Address{}
-		}
+		if rs[i].Type != ArbitrumLegacyTxType {
+			// The contract address can be derived from the transaction itself
+			if txs[i].To() == nil {
+				if rs[i].ContractAddress == (common.Address{}) {
+					// Deriving the signer is expensive, only do if it's actually needed
+					from, _ := Sender(signer, txs[i])
+					rs[i].ContractAddress = crypto.CreateAddress(from, txs[i].Nonce())
+				}
+			} else {
+				rs[i].ContractAddress = common.Address{}
+			}
 
-		// The used gas can be calculated based on previous r
-		if i == 0 {
-			rs[i].GasUsed = rs[i].CumulativeGasUsed
-		} else {
-			rs[i].GasUsed = rs[i].CumulativeGasUsed - rs[i-1].CumulativeGasUsed
+			// The used gas can be calculated based on previous r
+			if i == 0 {
+				rs[i].GasUsed = rs[i].CumulativeGasUsed
+			} else {
+				rs[i].GasUsed = rs[i].CumulativeGasUsed - rs[i-1].CumulativeGasUsed
+			}
 		}
 
 		// The derived log fields can simply be set from the block and transaction

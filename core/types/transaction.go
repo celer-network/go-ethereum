@@ -171,7 +171,7 @@ func (tx *Transaction) DecodeRLP(s *rlp.Stream) error {
 			return err
 		}
 		// Now decode the inner transaction.
-		inner, err := tx.decodeTyped(b)
+		inner, err := tx.decodeTyped(b, true)
 		if err == nil {
 			tx.setDecoded(inner, size)
 		}
@@ -193,7 +193,7 @@ func (tx *Transaction) UnmarshalBinary(b []byte) error {
 		return nil
 	}
 	// It's an EIP-2718 typed transaction envelope.
-	inner, err := tx.decodeTyped(b)
+	inner, err := tx.decodeTyped(b, false)
 	if err != nil {
 		return err
 	}
@@ -202,22 +202,44 @@ func (tx *Transaction) UnmarshalBinary(b []byte) error {
 }
 
 // decodeTyped decodes a typed transaction from the canonical format.
-func (tx *Transaction) decodeTyped(b []byte) (TxData, error) {
+func (tx *Transaction) decodeTyped(b []byte, arbParsing bool) (TxData, error) {
 	if len(b) <= 1 {
 		return nil, errShortTypedTx
 	}
 	var inner TxData
-	switch b[0] {
-	case AccessListTxType:
-		inner = new(AccessListTx)
-	case DynamicFeeTxType:
-		inner = new(DynamicFeeTx)
-	case BlobTxType:
-		inner = new(BlobTx)
-	case DepositTxType:
-		inner = new(DepositTx)
-	default:
-		return nil, ErrTxTypeNotSupported
+	if arbParsing {
+		switch b[0] {
+		case ArbitrumDepositTxType:
+			inner = new(ArbitrumDepositTx)
+		case ArbitrumInternalTxType:
+			inner = new(ArbitrumInternalTx)
+		case ArbitrumUnsignedTxType:
+			inner = new(ArbitrumUnsignedTx)
+		case ArbitrumContractTxType:
+			inner = new(ArbitrumContractTx)
+		case ArbitrumRetryTxType:
+			inner = new(ArbitrumRetryTx)
+		case ArbitrumSubmitRetryableTxType:
+			inner = new(ArbitrumSubmitRetryableTx)
+		case ArbitrumLegacyTxType:
+			inner = new(ArbitrumLegacyTxData)
+		default:
+			arbParsing = false
+		}
+	}
+	if !arbParsing {
+		switch b[0] {
+		case AccessListTxType:
+			inner = new(AccessListTx)
+		case DynamicFeeTxType:
+			inner = new(DynamicFeeTx)
+		case BlobTxType:
+			inner = new(BlobTx)
+		case DepositTxType:
+			inner = new(DepositTx)
+		default:
+			return nil, ErrTxTypeNotSupported
+		}
 	}
 	err := inner.decode(b[1:])
 	return inner, err
@@ -498,6 +520,8 @@ func (tx *Transaction) Hash() common.Hash {
 	var h common.Hash
 	if tx.Type() == LegacyTxType {
 		h = rlpHash(tx.inner)
+	} else if tx.Type() == ArbitrumLegacyTxType {
+		h = tx.inner.(*ArbitrumLegacyTxData).HashOverride
 	} else {
 		h = prefixedRlpHash(tx.Type(), tx.inner)
 	}
@@ -561,6 +585,9 @@ func (s Transactions) EncodeIndex(i int, w *bytes.Buffer) {
 	tx := s[i]
 	if tx.Type() == LegacyTxType {
 		rlp.Encode(w, tx.inner)
+	} else if tx.Type() == ArbitrumLegacyTxType {
+		arbData := tx.inner.(*ArbitrumLegacyTxData)
+		arbData.EncodeOnlyLegacyInto(w)
 	} else {
 		tx.encodeTyped(w)
 	}
