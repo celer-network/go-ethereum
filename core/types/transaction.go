@@ -49,6 +49,7 @@ const (
 	AccessListTxType = 0x01
 	DynamicFeeTxType = 0x02
 	BlobTxType       = 0x03
+	SetCodeTxType    = 0x04
 
 	ArbitrumDepositTxType         = 0x64
 	ArbitrumUnsignedTxType        = 0x65
@@ -237,6 +238,8 @@ func (tx *Transaction) decodeTyped(b []byte, arbParsing bool) (TxData, error) {
 			inner = new(BlobTx)
 		case DepositTxType:
 			inner = new(DepositTx)
+		case SetCodeTxType:
+			inner = new(SetCodeTx)
 		default:
 			return nil, ErrTxTypeNotSupported
 		}
