@@ -70,12 +70,12 @@ type SetCodeTx struct {
 
 // SetCodeAuthorization is an authorization from an account to deploy code at its address.
 type SetCodeAuthorization struct {
-	ChainID uint256.Int    `json:"chainId" gencodec:"required"`
-	Address common.Address `json:"address" gencodec:"required"`
-	Nonce   uint64         `json:"nonce" gencodec:"required"`
-	V       uint8          `json:"yParity" gencodec:"required"`
-	R       uint256.Int    `json:"r" gencodec:"required"`
-	S       uint256.Int    `json:"s" gencodec:"required"`
+	ChainID uint256.Int     `json:"chainId" gencodec:"required"`
+	Address common.Address  `json:"address" gencodec:"required"`
+	Nonce   *hexutil.Uint64 `json:"nonce" gencodec:"required"`
+	V       hexutil.Uint64  `json:"yParity" gencodec:"required"`
+	R       uint256.Int     `json:"r" gencodec:"required"`
+	S       uint256.Int     `json:"s" gencodec:"required"`
 }
 
 // field type overrides for gencodec
@@ -99,7 +99,7 @@ func SignSetCode(prv *ecdsa.PrivateKey, auth SetCodeAuthorization) (SetCodeAutho
 		ChainID: auth.ChainID,
 		Address: auth.Address,
 		Nonce:   auth.Nonce,
-		V:       sig[64],
+		V:       hexutil.Uint64(sig[64]),
 		R:       *uint256.MustFromBig(r),
 		S:       *uint256.MustFromBig(s),
 	}, nil
@@ -116,14 +116,14 @@ func (a *SetCodeAuthorization) sigHash() common.Hash {
 // Authority recovers the authorizing account of an authorization.
 func (a *SetCodeAuthorization) Authority() (common.Address, error) {
 	sighash := a.sigHash()
-	if !crypto.ValidateSignatureValues(a.V, a.R.ToBig(), a.S.ToBig(), true) {
+	if !crypto.ValidateSignatureValues(byte(a.V), a.R.ToBig(), a.S.ToBig(), true) {
 		return common.Address{}, ErrInvalidSig
 	}
 	// encode the signature in uncompressed format
 	var sig [crypto.SignatureLength]byte
 	a.R.WriteToSlice(sig[:32])
 	a.S.WriteToSlice(sig[32:64])
-	sig[64] = a.V
+	sig[64] = byte(a.V)
 	// recover the public key from the signature
 	pub, err := crypto.Ecrecover(sighash[:], sig[:])
 	if err != nil {
